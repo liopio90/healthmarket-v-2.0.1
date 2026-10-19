@@ -3,12 +3,23 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
+const webpush = require('web-push');
 
 // Load environment variables from the root .env file
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
+const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
+
+if (vapidPublicKey && vapidPrivateKey) {
+  webpush.setVapidDetails(
+    process.env.VAPID_CONTACT || 'mailto:soporte@healthmarket.local',
+    vapidPublicKey,
+    vapidPrivateKey,
+  );
+}
 
 // Middleware
 app.use(cors());
@@ -44,6 +55,11 @@ async function initDb() {
       age INTEGER,
       phone VARCHAR(50),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      endpoint TEXT PRIMARY KEY,
+      subscription JSONB NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `;
   try {
@@ -143,6 +159,86 @@ app.post('/api/users', async (req, res) => {
   } catch (err) {
     console.error('Error saving user profile:', err);
     res.status(500).json({ error: 'Database error saving user profile' });
+  }
+});
+
+app.get('/api/push/public-key', (req, res) => {
+  if (!vapidPublicKey || !vapidPrivateKey) {
+    return res.status(503).json({ error: 'El servidor no tiene claves VAPID configuradas.' });
+  }
+  res.json({ publicKey: vapidPublicKey });
+});
+
+app.post('/api/push/subscribe', async (req, res) => {
+  const { subscription } = req.body;
+  const endpoint = subscription?.endpoint;
+  const keys = subscription?.keys;
+  if (typeof endpoint !== 'string' || !endpoint.startsWith('https://') || !keys?.p256dh || !keys?.auth) {
+    return res.status(400).json({ error: 'La suscripción push no es válida.' });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO push_subscriptions (endpoint, subscription, updated_at)
+       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+       ON CONFLICT (endpoint) DO UPDATE SET
+         subscription = EXCLUDED.subscription,
+         updated_at = CURRENT_TIMESTAMP`,
+      [endpoint, JSON.stringify(subscription)],
+    );
+    res.status(201).json({ subscribed: true });
+  } catch (err) {
+    console.error('Error saving push subscription:', err);
+    res.status(500).json({ error: 'No se pudo guardar la suscripción push.' });
+  }
+});
+
+app.delete('/api/push/subscribe', async (req, res) => {
+  const { endpoint } = req.body;
+  if (typeof endpoint !== 'string') {
+    return res.status(400).json({ error: 'Falta el endpoint de la suscripción.' });
+  }
+
+  try {
+    await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]);
+    res.json({ subscribed: false });
+  } catch (err) {
+    console.error('Error removing push subscription:', err);
+    res.status(500).json({ error: 'No se pudo eliminar la suscripción push.' });
+  }
+});
+
+app.post('/api/push/test', async (req, res) => {
+  const { endpoint } = req.body;
+  if (!vapidPublicKey || !vapidPrivateKey) {
+    return res.status(503).json({ error: 'Configura VAPID_PUBLIC_KEY y VAPID_PRIVATE_KEY en el backend.' });
+  }
+  if (typeof endpoint !== 'string') {
+    return res.status(400).json({ error: 'Falta el endpoint de la suscripción.' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT subscription FROM push_subscriptions WHERE endpoint = $1',
+      [endpoint],
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No se encontró una suscripción para este dispositivo.' });
+    }
+
+    await webpush.sendNotification(result.rows[0].subscription, JSON.stringify({
+      title: 'Health Market',
+      body: 'Las notificaciones push están activas en este dispositivo.',
+      url: '/',
+    }));
+    res.status(202).json({ sent: true });
+  } catch (err) {
+    if (err.statusCode === 404 || err.statusCode === 410) {
+      await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]).catch(() => {});
+      return res.status(410).json({ error: 'La suscripción caducó. Activa las notificaciones nuevamente.' });
+    }
+    console.error('Error sending test push:', err);
+    res.status(502).json({ error: 'No se pudo enviar la notificación push de prueba.' });
   }
 });
 

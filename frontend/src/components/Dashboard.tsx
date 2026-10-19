@@ -15,6 +15,7 @@ import { ImageWithFallback } from './figma/ImageWithFallback';
 import { Badge } from './ui/badge';
 import { ModernFooter } from './ModernFooter';
 import { FloatingContact } from './FloatingContact';
+import { DeviceFeatures } from './DeviceFeatures';
 import { auth, googleProvider } from '../firebase';
 import { 
   signInWithEmailAndPassword, 
@@ -173,6 +174,7 @@ export function Dashboard({ user, onLogin, onLogout }: DashboardProps) {
       {currentPage === 'inicio' && (
         <main>
           <HeroCarousel />
+          <DeviceFeatures />
           <FeaturedProductsSection 
             onProductClick={handleProductClick}
             onAddToCart={addToCart}
